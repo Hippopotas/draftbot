@@ -54,18 +54,35 @@ class DraftManager(commands.Cog):
         await self.run_draft(curr_draft)
 
     async def run_draft(self, curr_draft):
-
-        boosters = []
-        for _ in range(3 * len(curr_draft['players'])):
-            boosters.append(Booster(mtg_set))
-
         mtg_set = curr_draft['set']
-        for player in curr_draft['players']:
+        players = curr_draft['players']
+
+        for player in players:
             await player.send(f'Starting {mtg_set} draft. '
                                'Your first pack will be given shortly.')
 
-        self.bot.add_cog(Draft(self.bot, curr_draft['set'], curr_draft['players'],
-                               boosters, curr_draft['id']))
+        random.shuffle(players)
+        draft_table = {}
+        for player in players:
+            draft_table[player.id] = DraftPlayer(player, mtg_set)
+
+        for i, player in enumerate(players):
+            left_id = players[(i-1)%len(players)].id
+            right_id = players[(i+1)%len(players)].id
+            draft_table[player.id].set_neighbors(draft_table[left_id],
+                                                 draft_table[right_id])
+
+        draft_id = curr_draft['id']
+        for player in players:
+            asyncio.create_task(draft_table[player.id].pack_runner(),
+                                name=f'{draft_id}_{player.id}_pack_q')
+            
+            for i in range(1, 4):
+                give_pack = Booster(mtg_set, draft_round=i)
+                await draft_table[player.id].pack_q.put(give_pack)
+
+        self.bot.add_cog(Draft(self.bot, mtg_set, draft_table, draft_id,
+                               name='draft-'+curr_draft['id']))
 
     @commands.command()
     async def start_draft(self, ctx, draft_id):
@@ -97,80 +114,84 @@ class DraftManager(commands.Cog):
 
 
 class Draft(commands.Cog):
-    def __init__(self, bot, mtg_set, players, boosters, draft_id):
+    def __init__(self, bot, mtg_set, players, draft_id):
         self.bot = bot
         self.mtg_set = mtg_set
-        self.boosters = boosters
+        self.players = players
         self.id = draft_id
-
-        random.shuffle(players)
-        self.players = {}
-        for player in players:
-            self.players[player.id] = DraftPlayer(player, self.mtg_set)
-
-        for i, player in enumerate(players):
-            left_id = players[(i-1)%len(players)].id
-            right_id = players[(i+1)%len(players)].id
-            self.players[player.id].set_neighbors(self.players[left_id],
-                                                  self.players[right_id])
-
-        for player in players:
-            asyncio.create_task(self.players[player.id].pack_runner(),
-                                name=f'{self.id}_{player.id}_pack_q')
-            await self.players[player.id].pack_q.put(self.boosters.pop())
 
     @commands.command()
     async def reserve(self, ctx, card_no):
         if (isinstance(ctx.channel, discord.channelDMChannel) and
                 ctx.author.id in self.players):
 
-            player_info = self.players[ctx.author.id]
+            player = self.players[ctx.author.id]
             
             if not isinstance(card_no, int):
                 print(type(card_no))
                 print(card_no)
                 return
-            if card_no > len(player_info.curr_pack.cards) or card_no < 1:
+            if card_no > len(player.curr_pack.cards) or card_no < 1:
                 await ctx.send('Invalid pick!')
                 return
 
-            card_names = await player_info.reserve(card_no)
+            card_names = await player.reserve(card_no)
             card_names = '; '.join(card_names)
 
-            if player_info.reserve_msg:
-                await player_info.reserve_msg.delete()
+            if player.reserve_msg:
+                await player.reserve_msg.delete()
             msg = await ctx.send(f'Currently reserved: {card_names}')
-            player_info.reserve_msg = msg
+            player.reserve_msg = msg
 
     @commands.command()
     async def pick(self, ctx, card_no):
         if (isinstance(ctx.channel, discord.channel.DMChannel) and
-                ctx.author.id in self.player_ids):
-            # if [logic for checking picks]
-            pass
-    
+                ctx.author.id in self.players):
+            try:
+                int(card_no)
+            except ValueError:
+                await ctx.send('Please enter a valid card number.')
+                return
+            
+            player = self.players[ctx.author.id]
+            card_no = int(card_no)
+
+            if player.curr_pack:
+                if (card_no < 1 or card_no > len(player.curr_pack) or card_no in player.picked):
+                    await ctx.send('Please enter a valid, unpicked card number.')
+                    return
+                
+                card_names = await player.pick(card_no)
+                card_names = '; '.join(card_names)
+
+                if player.pick_msg:
+                    await player.pick_msg.delete()
+                msg = await ctx.send(f'Picked: {card_names}')
+                player.pick_msg = msg
+
     @commands.command()
     async def pack(self, ctx):
         if (isinstance(ctx.channel, discord.channel.DMChannel) and
                 ctx.author.id in self.player_ids):
-            await self.show_pack(ctx.author)
+            await self.players[ctx.author.id].show_pack()
 
-    async def show_pack(self, player):
-        player_info = self.players[player.id]
-        if not player_info.curr_pack:
-            await player.send('You have no packs.')
-        else:
-            await player.send('Placeholder for how cards should look')
+    @commands.command()
+    async def pool(self, ctx):
+        if (isinstance(ctx.channel, discord.channel.DMChannel) and
+                ctx.author.id in self.player_ids):
+            await self.players[ctx.author.id].show_pool()
 
 class DraftPlayer():
     def __init__(self, player, mtg_set):
         self.player = player
         self.mtg_set = mtg_set
         self.pack_q = asyncio.Queue()
+        self.next_round_q = asyncio.Queue()
         self.done = False
 
         self.left = None
         self.right = None
+        self.curr_round = 1
 
         self.curr_pack = None
         self.pack_msg = None
@@ -178,18 +199,34 @@ class DraftPlayer():
         self.reserved = []
         self.reserve_msg = None
 
+        self.picked = []
+        self.pick_msg = None
+
         self.pool = []
 
     async def pack_runner(self):
         while not self.done:
             if not self.curr_pack:
                 new_pack = await self.pack_q.get()
-                self.curr_pack = new_pack
-            await asyncio.sleep(5)
+                if new_pack.draft_round == self.curr_round:
+                    self.curr_pack = new_pack
+                    self.show_pack()
+                else:
+                    self.next_round_q.put(new_pack)
+            await asyncio.sleep(3)
 
     def set_neighbors(self, left, right):
         self.left = left
         self.right = right
+
+    async def show_pack(self):
+        if not self.curr_pack:
+            await self.player.send('You have no packs.')
+        else:
+            await self.player.send('Placeholder for how cards should look')
+    
+    async def show_pool(self):
+        await self.player.send('Placeholder for how pool should look')
 
     def reserve(self, card_no):
         max_reserve = 1
@@ -203,5 +240,46 @@ class DraftPlayer():
         card_names = []
         for card in self.reserved:
             card_names.append(card['name'])
+        
+        return card_names
 
-    def pick(self, card_no):
+    async def pick(self, card_no):
+        max_pick = 1
+        if self.mtg_set in ('CMR', 'BBD', '2XM'):
+            max_pick = 2
+        
+        self.picked.append(card_no)
+
+        card_names = []
+        for card in self.picked:
+            card_names.append(self.curr_pack.cards[card-1]['name'])
+
+        if len(self.picked) >= max_pick:
+            for cn in self.picked:
+                self.pool.append(self.curr_pack.cards[cn-1])
+            self.curr_pack.cards = [c for i, c in enumerate(self.curr_pack.cards) if i+1 not in self.picked]
+
+            await self.pass_pack()
+
+        return card_names
+    
+    async def pass_pack(self):
+        self.reserved = []
+        self.picked = []
+        self.reserve_msg = None
+        self.pick_msg = None
+
+        to_neighbor = self.left
+        if self.curr_round % 2 == 0:
+            to_neighbor = self.right
+        
+        await to_neighbor.pack_q.put(self.curr_pack)
+
+        if len(self.pool) >= self.curr_round * self.curr_pack.pack_size:
+            self.curr_round += 1
+        
+            while not self.pack_q.empty():
+                self.next_round_q.put_nowait(self.pack_q.get_nowait())
+
+            self.pack_q = self.next_round_q
+            self.next_round_q = asyncio.Queue()

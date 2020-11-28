@@ -12,9 +12,11 @@ def card_finder(cardlist, uuid):
 
 
 class Booster():
-    def __init__(self, mtg_set):
+    def __init__(self, mtg_set, draft_round=None):
         self.set = mtg_set
+        self.draft_round = draft_round
         self.cards = self.generate(self.set)
+        self.pack_size = len(self.cards)
 
     @staticmethod
     def generate(mtg_set):
