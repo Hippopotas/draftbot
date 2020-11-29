@@ -54,7 +54,7 @@ class Booster():
                                                 size=seeding[sheet],
                                                 replace=False,
                                                 p=card_weights)
-                
+
                 if color_balance:
                     color_dist = {c:0 for c in MTG_COLORS}
                     for uuid in chosen_cards:
@@ -67,11 +67,13 @@ class Booster():
                     for v in color_dist.values():
                         if v < 1:
                             is_color_balanced = False
-                        if v > 3:
+                        if v > 4:
                             is_color_balanced = False
 
             for card in chosen_cards:
-                pack_list.append(card_finder(all_cards, card))
+                card_info = card_finder(all_cards, card)
+                card_info['is_foil'] = sheet_info['foil']
+                pack_list.append(card_info)
 
         return pack_list
     

@@ -4,7 +4,7 @@ import os
 
 from dotenv import load_dotenv
 
-from draft import DraftManager
+from draft import MTGDraftManager
 
 
 class DraftBot(discord.ext.commands.Bot):
@@ -27,5 +27,5 @@ if __name__ == "__main__":
     TOKEN = os.getenv('DISCORD_TOKEN')
 
     bot = DraftBot()
-    bot.add_cog(DraftManager(bot))
+    bot.add_cog(MTGDraftManager(bot))
     bot.run(TOKEN)
