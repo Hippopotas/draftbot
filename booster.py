@@ -25,6 +25,12 @@ class Booster():
             set_data = json.load(f)['data']
         
         all_cards = set_data['cards']
+
+        if mtg_set.upper() == 'MB1':
+            with open(f'{SET_PATH}/FMB1.json', encoding='UTF-8') as f:
+                foil_data = json.load(f)['data']
+                all_cards += foil_data['cards']
+
         booster_info = set_data['booster']['default']
 
         config_weights = list(map(lambda d: d['weight'], booster_info['boosters']))

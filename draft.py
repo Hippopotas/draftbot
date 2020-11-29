@@ -8,7 +8,8 @@ import string
 from discord.ext import commands
 
 from booster import Booster
-from constants import IMG_NOT_FOUND
+from constants import IMG_NOT_FOUND, SUPPORTED_FORMATS
+
 
 SCRYFALL_SET_URL = 'https://api.scryfall.com/sets'
 EMPTY_POOL_URL = 'https://scryfall.com/search?q=cn%3A-1'
@@ -46,8 +47,7 @@ class MTGDraftManager(commands.Cog):
                     reaction.emoji == '✋')
         
         mtg_set = mtg_set.upper()
-        lower_mtg_set = mtg_set.lower()
-        if mtg_set != 'CMR':
+        if mtg_set not in SUPPORTED_FORMATS:
             await ctx.send('Unsupported draft format.')
             return
         
@@ -58,9 +58,8 @@ class MTGDraftManager(commands.Cog):
                                               string.digits, k=4))
 
         icon_url = IMG_NOT_FOUND
-        with requests.get(f'{SCRYFALL_SET_URL}/{lower_mtg_set}') as r:
-            if r.status_code == 200:
-                icon_url = json.loads(r.text)['icon_svg_uri']
+        if SUPPORTED_FORMATS[mtg_set]:
+            icon_url = SUPPORTED_FORMATS[mtg_set]
 
         draft_embed = {'title': f'{ctx.author.display_name}\'s Draft',
                        'description': f'{max_players}-person {mtg_set} draft.\nReact with ✋ to join!',
@@ -70,7 +69,6 @@ class MTGDraftManager(commands.Cog):
                                                                  f'Will also fire upon reaching {max_players} people.')},
                                   {'name': 'Status', 'value': 'Open'}
                                  ]}
-        print(draft_embed)
 
         signups = await ctx.send(embed=discord.Embed.from_dict(draft_embed))
 
@@ -93,7 +91,7 @@ class MTGDraftManager(commands.Cog):
         random.shuffle(players)
         draft_table = {}
         for player in players:
-            draft_table[player.id] = DraftPlayer(player, mtg_set, curr_draft.id)
+            draft_table[player.id] = DraftPlayer(player, mtg_set, curr_draft)
 
         for i, player in enumerate(players):
             left_id = players[(i-1)%len(players)].id
@@ -114,13 +112,9 @@ class MTGDraftManager(commands.Cog):
         for _ in range(curr_draft.table_size):
             await curr_draft.done.get()
         
-        await self.cleanup_draft(curr_draft)
+        self.cleanup_draft(curr_draft)
 
-    async def cleanup_draft(self, curr_draft):
-        for task in asyncio.all_tasks():
-            if task.get_name().startswith(f'{curr_draft.id}_pack_q_'):
-                task.cancel()
-        
+    def cleanup_draft(self, curr_draft):
         del self.drafts[curr_draft.id]
 
     @commands.command(brief='Starts a given draft pod.',
@@ -292,9 +286,9 @@ class Draft():
 
 
 class DraftPlayer():
-    def __init__(self, player, mtg_set, draft_id):
+    def __init__(self, player, mtg_set, draft):
         self.player = player
-        self.draft = draft_id
+        self.draft = draft
         self.mtg_set = mtg_set
         self.pack_q = asyncio.Queue()
         self.next_round_q = asyncio.Queue()
@@ -447,6 +441,12 @@ class DraftPlayer():
         self.reserved = []
         self.num_picks = 0
 
+        if self.mtg_set == '2XM':
+            if self.sub_round == 1:
+                self.max_picks = 1
+            elif self.sub_round == 15:
+                self.max_picks = 2
+
         to_neighbor = self.left
         if self.curr_round % 2 == 0:
             to_neighbor = self.right
@@ -454,6 +454,11 @@ class DraftPlayer():
         await to_neighbor.pack_q.put(self.curr_pack)
 
         if len(self.pool) >= self.curr_round * self.curr_pack.pack_size:
+            if self.curr_round == 3:
+                self.done = True
+                await self.draft.done.put('done')
+                return
+
             self.curr_round += 1
             self.sub_round = 0
         
