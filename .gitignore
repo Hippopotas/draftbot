@@ -21,3 +21,13 @@ $RECYCLE.BIN/
 # =========================
 # Operating System Files
 # =========================
+.env
+__pycache__/booster.cpython-36.pyc
+__pycache__/booster.cpython-38.pyc
+__pycache__/constants.cpython-36.pyc
+__pycache__/constants.cpython-38.pyc
+__pycache__/draft.cpython-38.pyc
+draftbot/
+set_icons/cmr.svg
+set_jsons/CMR.json
+set_jsons/readablecmr.json

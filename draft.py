@@ -246,6 +246,7 @@ class MTGDraftManager(commands.Cog):
 
                 await ctx.send(f'Picked: {card_name}')
                 await player.show_pack()
+                player.waiting = False      # End of lock for race condition vs player.pack_runner
 
     @commands.command(brief='Displays the current pack.',
                       description=('Prints out the contents of the current pack '
@@ -312,6 +313,7 @@ class DraftPlayer():
         self.pool = []
         self.pool_msg = None
 
+        self.waiting = False
         self.num_picks = 0
         self.max_picks = 1
         if self.mtg_set in ('CMR', 'BBD', '2XM'):
@@ -319,7 +321,7 @@ class DraftPlayer():
 
     async def pack_runner(self):
         while not self.done:
-            if not self.curr_pack:
+            if not self.curr_pack and not self.waiting:
                 new_pack = await self.pack_q.get()
                 if new_pack.draft_round == self.curr_round:
                     if len(new_pack.cards) == 0:
@@ -365,29 +367,36 @@ class DraftPlayer():
         if not self.pack_msg:
             self.pack_msg = await self.player.send(embed=pack_embed)
         else:
-            # Prevents race condition when passing pack.
-            old_pack_msg = self.pack_msg
+            await self.pack_msg.delete()
             self.pack_msg = await self.player.send(embed=pack_embed)
-            await old_pack_msg.delete()
 
-    async def show_pool(self):
+    def format_cardpool(self):
         card_counts = {}
         for card in self.pool:
+            coll_no = int(card['number'])
+
             cardname = card['name']
             if card['is_foil']:
                 cardname += ' \*FOIL\*'
+                coll_no += 0.5
 
-            if cardname in card_counts:
-                card_counts[cardname] += 1
+            if coll_no in card_counts:
+                card_counts[coll_no]['count'] += 1
             else:
-                card_counts[cardname] = 1
+                card_counts[coll_no] = {'count': 1, 'name': cardname}
+        
+        pool_str = ''
+        for _, card_info in card_counts.items():
+            count = card_info['count']
+            card_name = card_info['name']
+            pool_str += f'{count}x {card_name}\n'
 
+        return pool_str
+
+    async def show_pool(self):
         card_images = Booster.cardlist_to_scryfall(self.pool, self.mtg_set)
 
-        embed_cards = ''
-        # Sorted list
-        for card, count in card_counts.items():
-            embed_cards += f'{count}x {card}\n'
+        embed_cards = self.format_cardpool()
         if not embed_cards:
             embed_cards = '(No cards in pool yet)'
             card_images = EMPTY_POOL_URL
@@ -446,7 +455,7 @@ class DraftPlayer():
 
         if len(self.pool) >= self.curr_round * self.curr_pack.pack_size:
             self.curr_round += 1
-            self.sub_round = 1
+            self.sub_round = 0
         
             while not self.pack_q.empty():
                 self.next_round_q.put_nowait(self.pack_q.get_nowait())
@@ -454,4 +463,5 @@ class DraftPlayer():
             self.pack_q = self.next_round_q
             self.next_round_q = asyncio.Queue()
         
+        self.waiting = True         # Start of lock for race condition vs player.pack_runner
         self.curr_pack = None

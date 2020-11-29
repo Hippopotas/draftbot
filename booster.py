@@ -86,6 +86,6 @@ class Booster():
             coll_no = card['number']
             query += f'cn%3A{coll_no}+or+'
 
-        scryfall_url = f'https://scryfall.com/search?q={query}%29&as=grid'
+        scryfall_url = f'https://scryfall.com/search?q={query}%29&order=set&as=grid'
 
         return scryfall_url
