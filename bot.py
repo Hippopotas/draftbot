@@ -13,7 +13,7 @@ class DraftBot(discord.ext.commands.Bot):
         intents.reactions = True
         intents.messages = True
 
-        super().__init__(command_prefix=';', intents=intents)
+        super().__init__(command_prefix='!', intents=intents)
         self.logger = logging.getLogger('discord')
     
     async def on_ready(self):

@@ -1,6 +1,7 @@
 import json
 import numpy as np
 import random
+import re
 
 from constants import MTG_COLORS, SET_PATH
 
@@ -9,6 +10,18 @@ def card_finder(cardlist, uuid):
     for card in cardlist:
         if card['uuid'] == uuid:
             return card
+
+def true_name(name):
+    return re.sub(r'[^a-zA-Z0-9]', '', name).lower()
+
+def get_card(mtg_set, cardname):
+    with open(f'{SET_PATH}/{mtg_set.upper()}.json', encoding='UTF-8') as f:
+        all_cards = json.load(f)['data']['cards']
+        for card in all_cards:
+            if true_name(card['name']) == true_name(cardname):
+                return card
+
+    return None
 
 
 class Booster():

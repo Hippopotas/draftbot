@@ -7,7 +7,7 @@ import string
 
 from discord.ext import commands
 
-from booster import Booster
+from booster import Booster, get_card, true_name
 from constants import IMG_NOT_FOUND, SUPPORTED_FORMATS
 
 
@@ -34,18 +34,19 @@ class MTGDraftManager(commands.Cog):
                       description=('Opens a normal draft in the format given by mtg_set, '
                                    'with an optional player cap set via max_players.\n'
                                    'The draft fires upon reaching the player cap, or '
-                                   'when ;start_draft is called.'))
+                                   'when !start_draft is called.'))
+    @commands.guild_only()
     async def create_draft(self, ctx, mtg_set, max_players=8):
         def _id_collision(draft_id):
             for draft in self.drafts.values():
-                if draft['id'] == draft_id:
+                if draft.id == draft_id:
                     return True
             return False
         
         def _msg_check(reaction, user):
             return (reaction.message.id == self.signup_id and
                     reaction.emoji == '✋')
-        
+
         mtg_set = mtg_set.upper()
         if mtg_set not in SUPPORTED_FORMATS:
             await ctx.send('Unsupported draft format.')
@@ -65,7 +66,7 @@ class MTGDraftManager(commands.Cog):
                        'description': f'{max_players}-person {mtg_set} draft.\nReact with ✋ to join!',
                        'thumbnail': {'url': f'{icon_url}'},
                        'fields': [{'name': 'Signed Up', 'value': '(Nobody yet!)'},
-                                  {'name': 'Draft ID', 'value': (f'Start with ;start_draft {draft_id}.\n'
+                                  {'name': 'Draft ID', 'value': (f'Start with !start_draft {draft_id}.\n'
                                                                  f'Will also fire upon reaching {max_players} people.')},
                                   {'name': 'Status', 'value': 'Open'}
                                  ]}
@@ -73,6 +74,8 @@ class MTGDraftManager(commands.Cog):
         signups = await ctx.send(embed=discord.Embed.from_dict(draft_embed))
 
         self.drafts[signups.id] = Draft(signups, mtg_set, draft_id, ctx.author.id, max_players)
+
+        await signups.add_reaction('✋')
 
         curr_draft = self.drafts[signups.id]
         await curr_draft.start.wait()
@@ -85,8 +88,15 @@ class MTGDraftManager(commands.Cog):
         players = curr_draft.players
 
         for player in players:
-            await player.send(f'Starting {mtg_set} draft. '
-                               'Your first pack will be given shortly.')
+            await player.send(f'Your {mtg_set} draft is starting!.\n')
+            help_msg = await player.send('Commands:\n!pick cardname/number = picks a card\n'
+                                         '!show cardname/number = view a card\n'
+                                         '!pack = show pack\n!pool = show cardpool')
+            # Pin help commands if first time. Otherwise, re-send.
+
+            player_pins = await player.dm_channel.pins()
+            if not player_pins:
+                await help_msg.pin()
 
         random.shuffle(players)
         draft_table = {}
@@ -120,7 +130,7 @@ class MTGDraftManager(commands.Cog):
     @commands.command(brief='Starts a given draft pod.',
                       description=('Fires the draft pod with draft_id.\n'
                                    'Pods can only be fired by the person who '
-                                   'started them with ;create_draft.'))
+                                   'made them with !create_draft.'))
     async def start_draft(self, ctx, draft_id):
         for draft in self.drafts.values():
             if ctx.author.id == draft.owner and draft_id == draft.id:
@@ -136,9 +146,32 @@ class MTGDraftManager(commands.Cog):
                 draft.start.set()
                 break
 
+    @commands.command(brief='Cancels a given draft pod.',
+                      description=('Deletes the draft with draft_id if it has not '
+                                   'started. Pods can only be cancelled by the person '
+                                   'who made them with !create_draft.'))
+    async def cancel_draft(self, ctx, draft_id):
+        for draft in self.drafts.values():
+            if (ctx.author.id == draft.owner and
+                    draft_id == draft.id and 
+                    not draft.in_progress):
+
+                draft_msg = draft.signup_msg
+                del self.drafts[draft_msg.id]
+
+                draft_embed = draft_msg.embeds[0].to_dict()
+                draft_embed['description'] = 'Draft cancelled.'
+                draft_embed['fields'][1]['value'] = 'Draft cancelled.'
+                draft_embed['fields'][2]['value'] = 'Cancelled'
+
+                await draft_msg.edit(embed=discord.Embed.from_dict(draft_embed))
+                break
+
     @commands.Cog.listener('on_reaction_add')
     async def add_drafter(self, reaction, user):
         if (reaction.message.id in self.drafts and reaction.emoji == '✋'):
+            if user == self.bot.user:
+                return
             if self.player_in_draft(user):
                 await user.send('You cannot join more than one draft at a time.')
                 return
@@ -147,13 +180,6 @@ class MTGDraftManager(commands.Cog):
             if not curr_draft.full:
                 curr_draft.players.append(user)
 
-                draft_embed = reaction.message.embeds[0].to_dict()
-                display_names = []
-                for player in curr_draft.players:
-                    display_names.append(player.display_name)
-                draft_embed['fields'][0]['value'] = ', '.join(display_names)
-                await reaction.message.edit(embed=discord.Embed.from_dict(draft_embed))
-
                 if len(curr_draft.players) >= curr_draft.table_size:
                     curr_draft.full = True
 
@@ -161,6 +187,16 @@ class MTGDraftManager(commands.Cog):
                     await reaction.message.edit(embed=discord.Embed.from_dict(draft_embed))
 
                     await curr_draft.start.set()
+
+                draft_embed = reaction.message.embeds[0].to_dict()
+                display_names = []
+                for player in curr_draft.players:
+                    display_names.append(player.display_name)
+                draft_embed['fields'][0]['value'] = ', '.join(display_names)
+                await reaction.message.edit(embed=discord.Embed.from_dict(draft_embed))
+
+                if len(curr_draft.players) > 0:
+                    await reaction.message.remove_reaction('✋', self.bot.user)
 
     @commands.Cog.listener('on_raw_reaction_remove')
     async def remove_drafter(self, payload):
@@ -180,6 +216,9 @@ class MTGDraftManager(commands.Cog):
                     draft_embed['fields'][0]['value'] = ', '.join(display_names)
                     await curr_draft.signup_msg.edit(embed=discord.Embed.from_dict(draft_embed))
 
+                    if len(player_list) == 0:
+                        await curr_draft.signup_msg.add_reaction('✋')
+
                     break
 
     # Commands during draft
@@ -189,83 +228,132 @@ class MTGDraftManager(commands.Cog):
                                    'to be automatically picked during a draft.\n'
                                    'Currently irrelevant due to draft timers not '
                                    'being implemented yet.'))
+    @commands.dm_only()
     async def reserve(self, ctx, card_no):
-        if isinstance(ctx.channel, discord.channelDMChannel):
-            draft_id = self.player_in_draft(ctx.author)
-            if not draft_id:
-                await ctx.send('You are not in a draft right now!')
-                return
+        draft_id = self.player_in_draft(ctx.author)
+        if not draft_id:
+            await ctx.send('You are not in a draft right now!')
+            return
 
-            player = self.drafts[draft_id].draft_table[ctx.author.id]
-            
-            if not isinstance(card_no, int):
-                print(type(card_no))
-                print(card_no)
-                return
-            if card_no > len(player.curr_pack.cards) or card_no < 1:
-                await ctx.send('Invalid pick!')
-                return
+        try:
+            int(card_no)
+        except ValueError:
+            await ctx.send('Please enter a valid card number.')
+            return
 
-            card_names = await player.reserve(card_no)
-            card_names = '; '.join(card_names)
+        player = self.drafts[draft_id].draft_table[ctx.author.id]
+        card_no = int(card_no)
 
-            await ctx.send(f'Currently reserved: {card_names}')
+        if card_no > len(player.curr_pack.cards) or card_no < 1:
+            await ctx.send('Invalid pick!')
+            return
+
+        card_names = await player.reserve(card_no)
+        card_names = '; '.join(card_names)
+
+        await ctx.send(f'Currently reserved: {card_names}')
 
     @commands.command(brief='Picks a card from a pack during a draft.',
-                      description=('Chooses the card that matches card_no from a '
+                      description=('Chooses a card that matches a number or a name from a '
                                    'pack during a draft and adds it to your pool.\n'
                                    'This cannot be undone.'))
-    async def pick(self, ctx, card_no):
-        if isinstance(ctx.channel, discord.channel.DMChannel):
-            draft_id = self.player_in_draft(ctx.author)
-            if not draft_id:
-                await ctx.send('You are not in a draft right now!')
+    @commands.dm_only()
+    async def pick(self, ctx, *card):
+        draft_id = self.player_in_draft(ctx.author)
+        if not draft_id:
+            await ctx.send('You are not in a draft right now!')
+            return
+
+        player = self.drafts[draft_id].draft_table[ctx.author.id]
+        if not player.curr_pack:
+            return
+
+        card_no = 0
+        try:
+            card_no = int(card[0])
+        except ValueError:
+            cardname = ''.join(card)
+
+            card_found = False
+            for i, card in enumerate(player.curr_pack.cards):
+                if true_name(card['name']) == true_name(cardname):
+                    card_no = i + 1
+                    card_found = True
+                    break
+
+            if not card_found:
+                await ctx.send('Please enter a valid card.')
                 return
 
-            try:
-                int(card_no)
-            except ValueError:
-                await ctx.send('Please enter a valid card number.')
-                return
-            
-            player = self.drafts[draft_id].draft_table[ctx.author.id]
-            card_no = int(card_no)
+        if (card_no < 1 or card_no > len(player.curr_pack.cards)):
+            await ctx.send('Please enter a valid card.')
+            return
+        
+        card_name = await player.pick(card_no)
 
-            if player.curr_pack:
-                if (card_no < 1 or card_no > len(player.curr_pack.cards)):
-                    await ctx.send('Please enter a valid, card number.')
-                    return
-                
-                card_name = await player.pick(card_no)
-
-                await ctx.send(f'Picked: {card_name}')
-                await player.show_pack()
-                player.waiting = False      # End of lock for race condition vs player.pack_runner
+        await ctx.send(f'Picked: {card_name}')
+        await player.show_pack()
+        player.waiting = False      # End of lock for race condition vs player.pack_runner
 
     @commands.command(brief='Displays the current pack.',
                       description=('Prints out the contents of the current pack '
                                    'during a draft.'))
+    @commands.dm_only()
     async def pack(self, ctx):
-        if isinstance(ctx.channel, discord.channel.DMChannel):
-            draft_id = self.player_in_draft(ctx.author)
-            if not draft_id:
-                await ctx.send('You are not in a draft right now!')
-                return
+        draft_id = self.player_in_draft(ctx.author)
+        if not draft_id:
+            await ctx.send('You are not in a draft right now!')
+            return
 
-            await self.drafts[draft_id].draft_table[ctx.author.id].show_pack()
+        await self.drafts[draft_id].draft_table[ctx.author.id].show_pack()
 
     @commands.command(brief='Displays the drafted cardpool.',
                       description=('Shows the current pool of drafted cards '
                                    'during a draft.'))
+    @commands.dm_only()
     async def pool(self, ctx):
-        if isinstance(ctx.channel, discord.channel.DMChannel):
-            draft_id = self.player_in_draft(ctx.author)
-            if not draft_id:
-                await ctx.send('You are not in a draft right now!')
+        draft_id = self.player_in_draft(ctx.author)
+        if not draft_id:
+            await ctx.send('You are not in a draft right now!')
+            return
+
+        await self.drafts[draft_id].draft_table[ctx.author.id].show_pool()
+
+    @commands.command(brief='Displays a card.',
+                      description='Shows a scryfall-esque box with the card\'s information.')
+    @commands.dm_only()
+    async def show(self, ctx, *card):
+        draft_id = self.player_in_draft(ctx.author)
+        if not draft_id:
+            await ctx.send('You are not in a draft right now!')
+            return
+
+        curr_draft = self.drafts[draft_id]
+        mtg_set = curr_draft.mtg_set.lower()
+        player = curr_draft.draft_table[ctx.author.id]
+
+        cardname = ''
+        try:
+            card_no = int(card[0])
+
+            if not player.curr_pack:
+                return
+            if card_no < 1 or card_no > len(player.curr_pack.cards):
+                await ctx.send('Please enter a valid card number.')
                 return
 
-            await self.drafts[draft_id].draft_table[ctx.author.id].show_pool()
+            cardname = player.curr_pack.cards[card_no-1]['name']
+        except ValueError:
+            cardname = ' '.join(card)
 
+        card_info = get_card(mtg_set, cardname)
+
+        msg = 'Card not found.'
+        if card_info:
+            coll_no = card_info['number']
+            msg = f'https://scryfall.com/card/{mtg_set}/{coll_no}/?utm_source=discord'
+
+        await ctx.send(msg)
 
 class Draft():
     def __init__(self, signup_msg, mtg_set, draft_id, owner, table_size):
